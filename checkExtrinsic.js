@@ -54,7 +54,39 @@ let debugCounters = {
   utilityMethods: {}
 };
 
-function checkAsDerivative(callMethod, callArgs, api, blockNumber, extrinsicIndex, signer, writeDetail, counters, depth = 0) {
+async function checkExtrinsicSuccess(api, blockHash, extrinsicIndex) {
+  try {
+    const events = await api.query.system.events.at(blockHash);
+    
+    const extrinsicEvents = events.filter(({ phase }) =>
+      phase.isApplyExtrinsic && phase.asApplyExtrinsic.eq(extrinsicIndex)
+    );
+    
+    // Check if there is a success or failure event
+    for (const { event } of extrinsicEvents) {
+      if (event.section === 'system') {
+        if (event.method === 'ExtrinsicSuccess') {
+          return { success: true, error: null };
+        } else if (event.method === 'ExtrinsicFailed') {
+          const errorInfo = event.data[0];
+          return {
+            success: false,
+            error: errorInfo.isModule
+              ? `${errorInfo.asModule.section}.${errorInfo.asModule.name}`
+              : errorInfo.toString()
+          };
+        }
+      }
+    }
+    
+    return { success: true, error: null };
+  } catch (error) {
+    console.log(`   ⚠️  Could not check extrinsic success: ${error.message}`);
+    return { success: null, error: 'unknown' };
+  }
+}
+
+async function checkAsDerivative(callMethod, callArgs, api, blockNumber, extrinsicIndex, signer, writeDetail, counters, blockHash, depth = 0) {
   // Debug: count found methods by section
   if (depth === 0) {
     const sectionName = callMethod.section.toString();
@@ -73,26 +105,38 @@ function checkAsDerivative(callMethod, callArgs, api, blockNumber, extrinsicInde
     const innerCall      = callArgs[1];
     const derivedAccount = deriveAccountCorrect(api, signer, derivativeIndex).toString();
 
+    let successInfo = { success: null, error: null };
+    if (depth === 0) {
+      successInfo = await checkExtrinsicSuccess(api, blockHash, extrinsicIndex);
+    }
+
     counters.unique.add(derivedAccount);
     counters.total++;
+
+    const successStatus = depth === 0
+      ? (successInfo.success === true ? 'SUCCESS' : successInfo.success === false ? 'FAILED' : 'UNKNOWN')
+      : 'NESTED';
 
     console.log(`   ✅ FOUND asDerivative #${counters.total}!`);
     console.log(`      Block: ${blockNumber}, Extrinsic: ${extrinsicIndex}`);
     console.log(`      Index: ${derivativeIndex}, Signer: ${signer.substring(0, 10)}...`);
     console.log(`      Derived: ${derivedAccount.substring(0, 10)}...`);
     console.log(`      Depth: ${depth}, Context: ${depth === 0 ? 'Direct' : 'Nested'}`);
+    console.log(`      Status: ${successStatus}${successInfo.error ? ` (${successInfo.error})` : ''}`);
 
     writeDetail({
       block: blockNumber,
       extrinsicIndex,
       signer,
       derivativeIndex,
-      derivedAccount
+      derivedAccount,
+      success: successInfo.success,
+      error: successInfo.error
     });
     
     // Continue checking the inner call for nested asDerivative
     if (innerCall && innerCall.method) {
-      checkAsDerivative(
+      await checkAsDerivative(
         innerCall.method,
         innerCall.args,
         api,
@@ -101,6 +145,7 @@ function checkAsDerivative(callMethod, callArgs, api, blockNumber, extrinsicInde
         signer,
         writeDetail,
         counters,
+        blockHash,
         depth + 1
       );
     }
@@ -120,9 +165,9 @@ function checkAsDerivative(callMethod, callArgs, api, blockNumber, extrinsicInde
       console.log(`   📦 Checking batch (${callMethod.method}) with ${callsArr.length} calls...`);
     }
     
-    callsArr.forEach((nested, idx) => {
+    for (const nested of callsArr) {
       if (nested && nested.method) {
-        checkAsDerivative(
+        await checkAsDerivative(
           nested.method,
           nested.args,
           api,
@@ -131,10 +176,11 @@ function checkAsDerivative(callMethod, callArgs, api, blockNumber, extrinsicInde
           signer,
           writeDetail,
           counters,
+          blockHash,
           depth + 1
         );
       }
-    });
+    }
     return;
   }
 
@@ -164,7 +210,7 @@ function checkAsDerivative(callMethod, callArgs, api, blockNumber, extrinsicInde
     }
     
     if (innerCall && innerCall.method) {
-      checkAsDerivative(
+      await checkAsDerivative(
         innerCall.method,
         innerCall.args,
         api,
@@ -173,6 +219,7 @@ function checkAsDerivative(callMethod, callArgs, api, blockNumber, extrinsicInde
         realSigner, // Use the real account being proxied
         writeDetail,
         counters,
+        blockHash,
         depth + 1
       );
     }
@@ -199,7 +246,7 @@ function checkAsDerivative(callMethod, callArgs, api, blockNumber, extrinsicInde
     }
     
     if (innerCall && innerCall.method) {
-      checkAsDerivative(
+      await checkAsDerivative(
         innerCall.method,
         innerCall.args,
         api,
@@ -208,6 +255,7 @@ function checkAsDerivative(callMethod, callArgs, api, blockNumber, extrinsicInde
         signer, // Keep original signer for multisig
         writeDetail,
         counters,
+        blockHash,
         depth + 1
       );
     }
@@ -232,7 +280,7 @@ function checkAsDerivative(callMethod, callArgs, api, blockNumber, extrinsicInde
     }
     
     if (innerCall && innerCall.method) {
-      checkAsDerivative(
+      await checkAsDerivative(
         innerCall.method,
         innerCall.args,
         api,
@@ -241,6 +289,7 @@ function checkAsDerivative(callMethod, callArgs, api, blockNumber, extrinsicInde
         signer,
         writeDetail,
         counters,
+        blockHash,
         depth + 1
       );
     }
@@ -274,7 +323,7 @@ function checkAsDerivative(callMethod, callArgs, api, blockNumber, extrinsicInde
     }
     
     if (innerCall && innerCall.method) {
-      checkAsDerivative(
+      await checkAsDerivative(
         innerCall.method,
         innerCall.args,
         api,
@@ -283,6 +332,7 @@ function checkAsDerivative(callMethod, callArgs, api, blockNumber, extrinsicInde
         signer,
         writeDetail,
         counters,
+        blockHash,
         depth + 1
       );
     }
@@ -302,7 +352,7 @@ function checkAsDerivative(callMethod, callArgs, api, blockNumber, extrinsicInde
 }
 
 async function testUtilityPallet(api) {
-  console.log('\n�� Checking available methods in Utility pallet...\n');
+  console.log('\nChecking available methods in Utility pallet...\n');
   
   try {
     if (api.tx.utility) {
@@ -454,10 +504,11 @@ async function main() {
   
   // Create CSV file with header if it doesn't exist
   if (!fs.existsSync(detailsPath)) {
-    fs.writeFileSync(detailsPath, 'block,extrinsicIndex,signer,derivativeIndex,derivedAccount\n');
+    fs.writeFileSync(detailsPath, 'block,extrinsicIndex,signer,derivativeIndex,derivedAccount,success\n');
   }
 
-  const counters = { total: 0, unique: new Set() };
+  const counters = { total: 0, unique: new Set(), duplicatesSkipped: 0 };
+  const recordedCombinations = new Set();
   const allBlocks = Array.from({ length: endBlock - startBlock + 1 }, (_, i) => startBlock + i);
   const batches = chunkArray(allBlocks, BATCH_SIZE);
 
@@ -483,10 +534,11 @@ async function main() {
         const blockNumber = batch[i];
         const extrinsics = blocks[i].block.extrinsics;
 
-        extrinsics.forEach((ex, idx) => {
+        for (let idx = 0; idx < extrinsics.length; idx++) {
+          const ex = extrinsics[idx];
           debugCounters.totalExtrinsics++;
           
-          if (!ex.signer) return;
+          if (!ex.signer) continue;
           
           // Count extrinsics by section for debugging
           const section = ex.method.section.toString();
@@ -499,12 +551,22 @@ async function main() {
           }
 
           const writeDetail = detail => {
-            const csvLine = `${detail.block},${detail.extrinsicIndex},${detail.signer},${detail.derivativeIndex},${detail.derivedAccount}\n`;
+            const key = `${detail.block}-${detail.extrinsicIndex}-${detail.signer}-${detail.derivativeIndex}`;
+            
+            if (recordedCombinations.has(key)) {
+              counters.duplicatesSkipped++;
+              console.log(`   ⚠️  Skipping duplicate: Block ${detail.block}, Extrinsic ${detail.extrinsicIndex}, Index ${detail.derivativeIndex}`);
+              return;
+            }
+            
+            recordedCombinations.add(key);
+            const successValue = detail.success === true ? 'true' : detail.success === false ? 'false' : '';
+            const csvLine = `${detail.block},${detail.extrinsicIndex},${detail.signer},${detail.derivativeIndex},${detail.derivedAccount},${successValue}\n`;
             fs.appendFileSync(detailsPath, csvLine);
           };
 
           // Check ALL extrinsics, not just utility ones
-          checkAsDerivative(
+          await checkAsDerivative(
             ex.method,
             ex.method.args || ex.args || [],
             api,
@@ -512,9 +574,10 @@ async function main() {
             idx,
             ex.signer.toString(),
             writeDetail,
-            counters
+            counters,
+            hashes[i] // blockHash
           );
-        });
+        }
       }
 
       // Update summary after each batch
@@ -528,6 +591,7 @@ async function main() {
         endBlock: currentEndBlock,
         totalDerivatives: counters.total,
         uniqueAccounts: counters.unique.size,
+        duplicatesSkipped: counters.duplicatesSkipped,
         totalExtrinsics: debugCounters.totalExtrinsics,
         utilityExtrinsics: debugCounters.utilityExtrinsics,
         utilityMethodsFound: debugCounters.utilityMethods,
@@ -567,6 +631,7 @@ async function main() {
   console.log(`🔧 Utility extrinsics: ${finalSummary.utilityExtrinsics}`);
   console.log(`🎯 asDerivative found: ${finalSummary.totalDerivatives}`);
   console.log(`🔑 Unique derived accounts: ${finalSummary.uniqueAccounts}`);
+  console.log(`⚠️  Duplicates skipped: ${finalSummary.duplicatesSkipped}`);
   
   if (Object.keys(finalSummary.utilityMethodsFound).length > 0) {
     console.log(`\n📊 Utility methods found:`);
