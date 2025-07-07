@@ -1,4 +1,3 @@
-// checkExtrinsic.js - Versione corretta
 const { ApiPromise, WsProvider } = require('@polkadot/api');
 const { u8aConcat, stringToU8a } = require('@polkadot/util');
 const { blake2AsU8a } = require('@polkadot/util-crypto');
@@ -6,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 
 // ——————————————————————————————————
-//  CONFIGURAZIONE
+//  CONFIGURATION
 // ——————————————————————————————————
 const DERIVATION_PREFIX = stringToU8a('modlpy/utilisuba');
 const BATCH_SIZE        = parseInt(process.env.BATCH_SIZE || '20', 10);
@@ -33,7 +32,7 @@ async function retry(fn, args = [], limit = RPC_RETRY_LIMIT) {
       return await fn(...args);
     } catch (e) {
       err = e;
-      console.log(`⚠️  Retry ${i + 1}/${limit} dopo errore: ${e.message}`);
+      console.log(`⚠️  Retry ${i + 1}/${limit} after error: ${e.message}`);
       await new Promise(r => setTimeout(r, RPC_RETRY_DELAY * (i + 1)));
     }
   }
@@ -48,7 +47,7 @@ function chunkArray(arr, size) {
   return chunks;
 }
 
-// Contatori per debug
+// Counters for debug
 let debugCounters = {
   totalExtrinsics: 0,
   utilityExtrinsics: 0,
@@ -56,13 +55,19 @@ let debugCounters = {
 };
 
 function checkAsDerivative(callMethod, callArgs, api, blockNumber, extrinsicIndex, signer, writeDetail, counters, depth = 0) {
-  // Debug: conta i metodi utility trovati
-  if (depth === 0 && callMethod.section === 'utility') {
+  // Debug: count found methods by section
+  if (depth === 0) {
+    const sectionName = callMethod.section.toString();
     const methodName = callMethod.method.toString();
-    debugCounters.utilityMethods[methodName] = (debugCounters.utilityMethods[methodName] || 0) + 1;
+    if (!debugCounters.sectionMethods) debugCounters.sectionMethods = {};
+    if (!debugCounters.sectionMethods[sectionName]) debugCounters.sectionMethods[sectionName] = {};
+    debugCounters.sectionMethods[sectionName][methodName] = (debugCounters.sectionMethods[sectionName][methodName] || 0) + 1;
+    
+    if (sectionName === 'utility') {
+      debugCounters.utilityMethods[methodName] = (debugCounters.utilityMethods[methodName] || 0) + 1;
+    }
   }
-  
-  // IMPORTANTE: usa 'asDerivative' (camelCase) non 'as_derivative'!
+
   if (callMethod.section === 'utility' && callMethod.method === 'asDerivative') {
     const derivativeIndex = callArgs[0].toNumber();
     const innerCall      = callArgs[1];
@@ -71,10 +76,11 @@ function checkAsDerivative(callMethod, callArgs, api, blockNumber, extrinsicInde
     counters.unique.add(derivedAccount);
     counters.total++;
 
-    console.log(`   ✅ TROVATO asDerivative #${counters.total}!`);
-    console.log(`      Blocco: ${blockNumber}, Extrinsic: ${extrinsicIndex}`);
+    console.log(`   ✅ FOUND asDerivative #${counters.total}!`);
+    console.log(`      Block: ${blockNumber}, Extrinsic: ${extrinsicIndex}`);
     console.log(`      Index: ${derivativeIndex}, Signer: ${signer.substring(0, 10)}...`);
     console.log(`      Derived: ${derivedAccount.substring(0, 10)}...`);
+    console.log(`      Depth: ${depth}, Context: ${depth === 0 ? 'Direct' : 'Nested'}`);
 
     writeDetail({
       block: blockNumber,
@@ -83,16 +89,30 @@ function checkAsDerivative(callMethod, callArgs, api, blockNumber, extrinsicInde
       derivativeIndex,
       derivedAccount,
       innerCall: `${innerCall.method.section}.${innerCall.method.method}`,
-      innerCallArgs: innerCall.args.map(a => a.toHuman())
+      innerCallArgs: innerCall.args.map(a => a.toHuman()),
+      depth,
+      context: depth === 0 ? 'Direct' : 'Nested'
     });
+    
+    // Continue checking the inner call for nested asDerivative
+    if (innerCall && innerCall.method) {
+      checkAsDerivative(
+        innerCall.method,
+        innerCall.args,
+        api,
+        blockNumber,
+        extrinsicIndex,
+        signer,
+        writeDetail,
+        counters,
+        depth + 1
+      );
+    }
     return;
   }
 
-  // Controlla batch calls (solo metodi comuni, forceBatch potrebbe non esistere)
-  if (
-    callMethod.section === 'utility' &&
-    ['batch', 'batchAll'].includes(callMethod.method)
-  ) {
+  // 2. Utility batch calls
+  if (callMethod.section === 'utility' && ['batch', 'batchAll', 'forceBatch'].includes(callMethod.method)) {
     const callsVec = callArgs[0];
     const callsArr = typeof callsVec.toArray === 'function'
       ? callsVec.toArray()
@@ -101,7 +121,7 @@ function checkAsDerivative(callMethod, callArgs, api, blockNumber, extrinsicInde
         : [];
     
     if (depth === 0 && callsArr.length > 0) {
-      console.log(`   📦 Controllo batch (${callMethod.method}) con ${callsArr.length} chiamate...`);
+      console.log(`   📦 Checking batch (${callMethod.method}) with ${callsArr.length} calls...`);
     }
     
     callsArr.forEach((nested, idx) => {
@@ -119,36 +139,193 @@ function checkAsDerivative(callMethod, callArgs, api, blockNumber, extrinsicInde
         );
       }
     });
+    return;
+  }
+
+  // 3. Proxy calls
+  if (callMethod.section === 'proxy') {
+    let realSigner = signer;
+    let innerCall = null;
+    
+    if (depth === 0) {
+      console.log(`   🔗 Checking proxy call (${callMethod.method})...`);
+    }
+    
+    if (['proxy', 'proxyAnnounced'].includes(callMethod.method)) {
+      // proxy(real, force_proxy_type, call) or proxyAnnounced(real, force_proxy_type, call, height)
+      realSigner = callArgs[0].toString(); // The 'real' account being proxied
+      const callIndex = callMethod.method === 'proxy' ? 2 : 2; // call is at index 2 for both
+      innerCall = callArgs[callIndex];
+    } else if (callMethod.method === 'anonymous') {
+      // anonymous(proxy_type, delay, index) - creates anonymous proxy, no inner call
+      return;
+    } else if (callMethod.method === 'killAnonymous') {
+      // killAnonymous(spawner, proxy_type, index, height, ext_index) - removes proxy, no inner call
+      return;
+    } else if (['removeProxy', 'removeProxies', 'addProxy', 'rejectAnnouncement', 'removeAnnouncement'].includes(callMethod.method)) {
+      // These don't contain inner calls
+      return;
+    }
+    
+    if (innerCall && innerCall.method) {
+      checkAsDerivative(
+        innerCall.method,
+        innerCall.args,
+        api,
+        blockNumber,
+        extrinsicIndex,
+        realSigner, // Use the real account being proxied
+        writeDetail,
+        counters,
+        depth + 1
+      );
+    }
+    return;
+  }
+
+  // 4. Multisig calls
+  if (callMethod.section === 'multisig') {
+    if (depth === 0) {
+      console.log(`   👥 Checking multisig call (${callMethod.method})...`);
+    }
+    
+    let innerCall = null;
+    
+    if (callMethod.method === 'asMulti') {
+      // asMulti(threshold, other_signatories, maybe_timepoint, call, max_weight)
+      innerCall = callArgs[3];
+    } else if (callMethod.method === 'asMultiThreshold1') {
+      // asMultiThreshold1(other_signatories, call)
+      innerCall = callArgs[1];
+    } else if (['approveAsMulti', 'cancelAsMulti'].includes(callMethod.method)) {
+      // These might contain call hashes but not actual calls to check
+      return;
+    }
+    
+    if (innerCall && innerCall.method) {
+      checkAsDerivative(
+        innerCall.method,
+        innerCall.args,
+        api,
+        blockNumber,
+        extrinsicIndex,
+        signer, // Keep original signer for multisig
+        writeDetail,
+        counters,
+        depth + 1
+      );
+    }
+    return;
+  }
+
+  // 5. Sudo calls
+  if (callMethod.section === 'sudo') {
+    if (depth === 0) {
+      console.log(`   👑 Checking sudo call (${callMethod.method})...`);
+    }
+    
+    let innerCall = null;
+    
+    if (['sudo', 'sudoUncheckedWeight'].includes(callMethod.method)) {
+      // sudo(call) or sudoUncheckedWeight(call, weight)
+      innerCall = callArgs[0];
+    } else if (callMethod.method === 'sudoAs') {
+      // sudoAs(who, call)
+      innerCall = callArgs[1];
+      // Note: we could also update signer to callArgs[0] (the 'who' account)
+    }
+    
+    if (innerCall && innerCall.method) {
+      checkAsDerivative(
+        innerCall.method,
+        innerCall.args,
+        api,
+        blockNumber,
+        extrinsicIndex,
+        signer,
+        writeDetail,
+        counters,
+        depth + 1
+      );
+    }
+    return;
+  }
+
+  // 6. Democracy calls that might contain proposals
+  if (callMethod.section === 'democracy') {
+    if (depth === 0) {
+      console.log(`   🗳️  Checking democracy call (${callMethod.method})...`);
+    }
+    return;
+  }
+
+  // 7. Scheduler calls
+  if (callMethod.section === 'scheduler') {
+    if (depth === 0) {
+      console.log(`   ⏰ Checking scheduler call (${callMethod.method})...`);
+    }
+    
+    let innerCall = null;
+    
+    if (['schedule', 'scheduleNamed'].includes(callMethod.method)) {
+      // schedule(when, maybe_periodic, priority, call) or scheduleNamed(id, when, maybe_periodic, priority, call)
+      const callIndex = callMethod.method === 'schedule' ? 3 : 4;
+      innerCall = callArgs[callIndex];
+    } else if (['scheduleAfter', 'scheduleNamedAfter'].includes(callMethod.method)) {
+      // scheduleAfter(after, maybe_periodic, priority, call) or scheduleNamedAfter(id, after, maybe_periodic, priority, call)
+      const callIndex = callMethod.method === 'scheduleAfter' ? 3 : 4;
+      innerCall = callArgs[callIndex];
+    }
+    
+    if (innerCall && innerCall.method) {
+      checkAsDerivative(
+        innerCall.method,
+        innerCall.args,
+        api,
+        blockNumber,
+        extrinsicIndex,
+        signer,
+        writeDetail,
+        counters,
+        depth + 1
+      );
+    }
+    return;
+  }
+
+  // 8. Preimage calls (used by governance)
+  if (callMethod.section === 'preimage') {
+    if (depth === 0) {
+      console.log(`   🖼️  Checking preimage call (${callMethod.method})...`);
+    }
+    
+    // Preimage calls store proposal data but don't execute them directly
+    // The actual execution happens through governance mechanisms
+    return;
   }
 }
 
-// ——————————————————————————————————
-//  TEST UTILITY PALLET - VERSIONE CORRETTA
-// ——————————————————————————————————
 async function testUtilityPallet(api) {
-  console.log('\n🧪 Verifica metodi disponibili nel pallet Utility...\n');
+  console.log('\n�� Checking available methods in Utility pallet...\n');
   
   try {
-    // Metodo 1: Usa l'API runtime se disponibile
     if (api.tx.utility) {
-      console.log('Metodi disponibili in utility (via api.tx):');
+      console.log('Available methods in utility (via api.tx):');
       const methods = Object.keys(api.tx.utility);
       methods.forEach(method => {
         console.log(`   - ${method}`);
       });
       
       if (!methods.includes('asDerivative')) {
-        console.log('\n⚠️  ATTENZIONE: asDerivative non trovato nei metodi!');
-        console.log('   Metodi trovati:', methods.join(', '));
+        console.log('\n⚠️  WARNING: asDerivative not found in methods!');
+        console.log('   Methods found:', methods.join(', '));
       } else {
-        console.log('\n✅ asDerivative è disponibile!');
+        console.log('\n✅ asDerivative is available!');
       }
       
       return methods;
     }
     
-    // Metodo 2: Fallback ai metadata raw
-    console.log('Accesso diretto ai metadata...');
     const metadata = await api.rpc.state.getMetadata();
     const modules = metadata.asLatest.pallets || metadata.asLatest.modules;
     
@@ -158,9 +335,8 @@ async function testUtilityPallet(api) {
     });
     
     if (utilityPallet) {
-      console.log('✅ Pallet Utility trovato nei metadata');
+      console.log('✅ Utility pallet found in metadata');
       
-      // Prova ad accedere ai calls in vari modi
       let callsData = null;
       if (utilityPallet.calls && utilityPallet.calls.isSome) {
         callsData = utilityPallet.calls.unwrap();
@@ -169,31 +345,26 @@ async function testUtilityPallet(api) {
       }
       
       if (callsData && callsData.length > 0) {
-        console.log(`Trovati ${callsData.length} metodi`);
-        // Non possiamo facilmente decodificare i nomi dai metadata raw
-        // quindi usiamo api.tx come fonte primaria
+        console.log(`Found ${callsData.length} methods`);
       }
     }
     
     return [];
     
   } catch (error) {
-    console.error('Errore nel test del pallet Utility:', error.message);
+    console.error('Error testing Utility pallet:', error.message);
     return [];
   }
 }
 
-// ——————————————————————————————————
-//  FUNZIONE DI DEBUG PER ESAMINARE UN BLOCCO
-// ——————————————————————————————————
 async function debugBlock(api, blockNumber) {
-  console.log(`\n🔍 DEBUG: Esaminando blocco ${blockNumber}...\n`);
+  console.log(`\n🔍 DEBUG: Examining block ${blockNumber}...\n`);
   
   try {
     const blockHash = await api.rpc.chain.getBlockHash(blockNumber);
     const signedBlock = await api.rpc.chain.getBlock(blockHash);
     
-    console.log(`Blocco ${blockNumber}: ${signedBlock.block.extrinsics.length} extrinsics totali`);
+    console.log(`Block ${blockNumber}: ${signedBlock.block.extrinsics.length} total extrinsics`);
     
     signedBlock.block.extrinsics.forEach((ex, idx) => {
       const { method, signer } = ex;
@@ -202,27 +373,46 @@ async function debugBlock(api, blockNumber) {
       console.log(`  Method: ${method.method}`);
       console.log(`  Signer: ${signer ? signer.toString().substring(0, 20) + '...' : 'None'}`);
       
-      if (method.section === 'utility') {
-        console.log(`  ⭐ UTILITY CALL TROVATA!`);
+      // Show details for relevant sections
+      const relevantSections = ['utility', 'proxy', 'multisig', 'sudo', 'scheduler'];
+      if (relevantSections.includes(method.section)) {
+        console.log(`  ⭐ ${method.section.toUpperCase()} CALL FOUND!`);
         console.log(`  Args length: ${method.args.length}`);
         
-        // Se è un batch, mostra le chiamate interne
-        if (['batch', 'batchAll'].includes(method.method) && method.args[0]) {
+        if (method.section === 'utility' && ['batch', 'batchAll', 'forceBatch'].includes(method.method) && method.args[0]) {
           const calls = method.args[0];
-          const callsArray = Array.isArray(calls) ? calls : 
+          const callsArray = Array.isArray(calls) ? calls :
                            (calls.toArray ? calls.toArray() : []);
-          console.log(`  Batch contiene ${callsArray.length} chiamate:`);
+          console.log(`  Batch contains ${callsArray.length} calls:`);
           callsArray.forEach((call, i) => {
             if (call && call.method) {
               console.log(`    ${i}: ${call.method.section}.${call.method.method}`);
             }
           });
+        } else if (method.section === 'proxy' && ['proxy', 'proxyAnnounced'].includes(method.method)) {
+          console.log(`  Proxy call - real account: ${method.args[0] ? method.args[0].toString().substring(0, 20) + '...' : 'Unknown'}`);
+          const innerCall = method.args[2];
+          if (innerCall && innerCall.method) {
+            console.log(`  Inner call: ${innerCall.method.section}.${innerCall.method.method}`);
+          }
+        } else if (method.section === 'multisig' && ['asMulti', 'asMultiThreshold1'].includes(method.method)) {
+          const callIndex = method.method === 'asMulti' ? 3 : 1;
+          const innerCall = method.args[callIndex];
+          if (innerCall && innerCall.method) {
+            console.log(`  Inner call: ${innerCall.method.section}.${innerCall.method.method}`);
+          }
+        } else if (method.section === 'sudo' && ['sudo', 'sudoAs', 'sudoUncheckedWeight'].includes(method.method)) {
+          const callIndex = method.method === 'sudoAs' ? 1 : 0;
+          const innerCall = method.args[callIndex];
+          if (innerCall && innerCall.method) {
+            console.log(`  Inner call: ${innerCall.method.section}.${innerCall.method.method}`);
+          }
         }
       }
     });
     
   } catch (error) {
-    console.error(`Errore nel debug del blocco ${blockNumber}:`, error.message);
+    console.error(`Error debugging block ${blockNumber}:`, error.message);
   }
 }
 
@@ -231,38 +421,38 @@ async function debugBlock(api, blockNumber) {
 // ——————————————————————————————————
 async function main() {
   const wsEndpoint = process.env.RPC_WS || 'wss://asset-hub-paseo-rpc.n.dwellir.com';
-  console.log(`🔌 Connessione a ${wsEndpoint}...`);
+  console.log(`🔌 Connecting to ${wsEndpoint}...`);
   
   const provider = new WsProvider(wsEndpoint);
   const api = await ApiPromise.create({ provider });
 
   // Info chain
   const chain = await api.rpc.system.chain();
-  console.log(`✅ Connesso a: ${chain}`);
+  console.log(`✅ Connected to: ${chain}`);
 
-  // Prima verifica i metodi disponibili
+  // First, check available methods
   const availableMethods = await testUtilityPallet(api);
 
-  // Header e blocchi
+  // Header and blocks
   const head = await retry(api.rpc.chain.getHeader.bind(api.rpc.chain), []);
   const latestNum = head.number.toNumber();
   
   const startBlock = parseInt(process.env.START_BLOCK || (latestNum - 1000), 10);
   const endBlock = parseInt(process.env.END_BLOCK || latestNum, 10);
 
-  console.log(`\n🔢 Range blocchi: ${startBlock} → ${endBlock} (${endBlock - startBlock + 1} blocchi)`);
+  console.log(`\n🔢 Block range: ${startBlock} → ${endBlock} (${endBlock - startBlock + 1} blocks)`);
   console.log(`📦 Batch size: ${BATCH_SIZE}\n`);
 
-  // Se il range è piccolo, fai debug dettagliato
+  // If the range is small, enable detailed debug
   if (endBlock - startBlock < 10) {
-    console.log('Range piccolo rilevato, abilito debug dettagliato...');
+    console.log('Small range detected, enabling detailed debug...');
     for (let b = startBlock; b <= endBlock; b++) {
       await debugBlock(api, b);
     }
   }
 
   const outDir = process.env.OUT_DIR || '.';
-  const detailsPath = path.join(outDir, 'derived_details-ah.json');
+  const detailsPath = path.join(outDir, 'derived_details-ah-test-200000.json');
   const summaryPath = path.join(outDir, 'derived_summary.json');
   const ws = fs.createWriteStream(detailsPath);
   ws.write('[');
@@ -274,13 +464,12 @@ async function main() {
 
   const startTime = Date.now();
 
-  console.log('\n🚀 Inizio scansione...\n');
+  console.log('\n🚀 Starting scan...\n');
 
   for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
     const batch = batches[batchIdx];
     
     try {
-      // Fetch paralleli
       const hashes = await retry(
         blocks => Promise.all(blocks.map(n => api.rpc.chain.getBlockHash(n))),
         [batch]
@@ -290,7 +479,7 @@ async function main() {
         [hashes]
       );
 
-      // Processa blocchi
+      // Process blocks
       for (let i = 0; i < blocks.length; i++) {
         const blockNumber = batch[i];
         const extrinsics = blocks[i].block.extrinsics;
@@ -300,10 +489,14 @@ async function main() {
           
           if (!ex.signer) return;
           
-          if (ex.method.section === 'utility') {
+          // Count extrinsics by section for debugging
+          const section = ex.method.section.toString();
+          if (!debugCounters.sectionCounts) debugCounters.sectionCounts = {};
+          debugCounters.sectionCounts[section] = (debugCounters.sectionCounts[section] || 0) + 1;
+          
+          // Keep legacy utility counter for compatibility
+          if (section === 'utility') {
             debugCounters.utilityExtrinsics++;
-          } else {
-            return;
           }
 
           const writeDetail = detail => {
@@ -312,6 +505,7 @@ async function main() {
             firstDetail = false;
           };
 
+          // Check ALL extrinsics, not just utility ones
           checkAsDerivative(
             ex.method,
             ex.method.args || ex.args || [],
@@ -330,10 +524,10 @@ async function main() {
       const elapsed = (Date.now() - startTime) / 1000;
       const rate = (batch[batch.length - 1] - startBlock + 1) / elapsed;
       
-      console.log(`✅ Batch ${batchIdx + 1}/${batches.length} (${progress}%) - ${rate.toFixed(1)} blocchi/s`);
+      console.log(`✅ Batch ${batchIdx + 1}/${batches.length} (${progress}%) - ${rate.toFixed(1)} blocks/s`);
       
     } catch (error) {
-      console.error(`❌ Errore batch ${batch[0]}-${batch[batch.length - 1]}:`, error.message);
+      console.error(`❌ Error batch ${batch[0]}-${batch[batch.length - 1]}:`, error.message);
     }
   }
 
@@ -352,6 +546,8 @@ async function main() {
     totalExtrinsics: debugCounters.totalExtrinsics,
     utilityExtrinsics: debugCounters.utilityExtrinsics,
     utilityMethodsFound: debugCounters.utilityMethods,
+    sectionCounts: debugCounters.sectionCounts || {},
+    sectionMethodsFound: debugCounters.sectionMethods || {},
     processingTime: `${elapsed}s`,
     blocksPerSecond: ((endBlock - startBlock + 1) / elapsed).toFixed(2),
     timestamp: new Date().toISOString()
@@ -360,35 +556,67 @@ async function main() {
   fs.writeFileSync(summaryPath, JSON.stringify(summary, null, 2));
 
   console.log('\n' + '='.repeat(60));
-  console.log('📊 SCAN COMPLETATO');
+  console.log('📊 SCAN COMPLETED');
   console.log('='.repeat(60));
-  console.log(`⏱️  Tempo: ${elapsed}s (${summary.blocksPerSecond} blocchi/s)`);
-  console.log(`📦 Extrinsics totali: ${debugCounters.totalExtrinsics}`);
+  console.log(`⏱️  Time: ${elapsed}s (${summary.blocksPerSecond} blocks/s)`);
+  console.log(`📦 Total extrinsics: ${debugCounters.totalExtrinsics}`);
   console.log(`🔧 Utility extrinsics: ${debugCounters.utilityExtrinsics}`);
-  console.log(`🎯 asDerivative trovati: ${counters.total}`);
-  console.log(`🔑 Account derivati unici: ${counters.unique.size}`);
+  console.log(`🎯 asDerivative found: ${counters.total}`);
+  console.log(`🔑 Unique derived accounts: ${counters.unique.size}`);
   
   if (Object.keys(debugCounters.utilityMethods).length > 0) {
-    console.log(`\n📊 Metodi utility trovati:`);
+    console.log(`\n📊 Utility methods found:`);
     Object.entries(debugCounters.utilityMethods).forEach(([method, count]) => {
       console.log(`   - ${method}: ${count}`);
     });
   }
 
-  console.log(`\n💾 Files salvati:`);
-  console.log(`   - Dettagli: ${detailsPath}`);
-  console.log(`   - Sommario: ${summaryPath}`);
+  // Show all sections analyzed
+  if (debugCounters.sectionCounts && Object.keys(debugCounters.sectionCounts).length > 0) {
+    console.log(`\n📋 Extrinsics by section:`);
+    Object.entries(debugCounters.sectionCounts)
+      .sort(([,a], [,b]) => b - a) // Sort by count descending
+      .forEach(([section, count]) => {
+        console.log(`   - ${section}: ${count}`);
+      });
+  }
+
+  // Show methods that could potentially contain asDerivative
+  if (debugCounters.sectionMethods) {
+    const relevantSections = ['proxy', 'multisig', 'sudo', 'scheduler', 'utility'];
+    const foundRelevant = relevantSections.filter(section =>
+      debugCounters.sectionMethods[section] && Object.keys(debugCounters.sectionMethods[section]).length > 0
+    );
+    
+    if (foundRelevant.length > 0) {
+      console.log(`\n🔍 Methods in relevant sections:`);
+      foundRelevant.forEach(section => {
+        console.log(`   ${section}:`);
+        Object.entries(debugCounters.sectionMethods[section]).forEach(([method, count]) => {
+          console.log(`     - ${method}: ${count}`);
+        });
+      });
+    }
+  }
+
+  console.log(`\n💾 Saved files:`);
+  console.log(`   - Details: ${detailsPath}`);
+  console.log(`   - Summary: ${summaryPath}`);
 
   if (counters.total === 0) {
-    console.log('\n⚠️  ATTENZIONE: Nessun asDerivative trovato!');
-    console.log('   Possibili cause:');
-    console.log('   1. Non ci sono chiamate asDerivative nel range specificato');
-    console.log('   2. Il metodo potrebbe avere un nome diverso su Paseo');
-    console.log('   3. Prova un range più ampio o verifica su un explorer');
+    console.log('\n⚠️  WARNING: No asDerivative found!');
+    console.log('\n💡 The enhanced scanner now checks:');
+    console.log('   ✅ Direct utility.asDerivative calls');
+    console.log('   ✅ Nested calls in utility.batch/batchAll/forceBatch');
+    console.log('   ✅ Calls wrapped in proxy.proxy/proxyAnnounced');
+    console.log('   ✅ Calls wrapped in multisig.asMulti/asMultiThreshold1');
+    console.log('   ✅ Calls wrapped in sudo.sudo/sudoAs/sudoUncheckedWeight');
+    console.log('   ✅ Calls wrapped in scheduler.schedule*/scheduleNamed*');
+    console.log('   ✅ Recursive analysis of nested calls');
   }
 
   await api.disconnect();
-  console.log('\n✅ Disconnesso.');
+  console.log('\n✅ Disconnected.');
 }
 
 // ——————————————————————————————————
