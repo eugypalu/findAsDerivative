@@ -451,9 +451,11 @@ async function main() {
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').split('.')[0];
   const detailsPath = path.join(outDir, `derived_details_${timestamp}.csv`);
   const summaryPath = path.join(outDir, `derived_summary_${timestamp}.json`);
-  const ws = fs.createWriteStream(detailsPath);
-  ws.write('block,extrinsicIndex,signer,derivativeIndex,derivedAccount\n');
-  let firstDetail = true;
+  
+  // Create CSV file with header if it doesn't exist
+  if (!fs.existsSync(detailsPath)) {
+    fs.writeFileSync(detailsPath, 'block,extrinsicIndex,signer,derivativeIndex,derivedAccount\n');
+  }
 
   const counters = { total: 0, unique: new Set() };
   const allBlocks = Array.from({ length: endBlock - startBlock + 1 }, (_, i) => startBlock + i);
@@ -497,8 +499,8 @@ async function main() {
           }
 
           const writeDetail = detail => {
-            const csvLine = `${detail.block},${detail.extrinsicIndex},${detail.signer},${detail.derivativeIndex},${detail.derivedAccount}`;
-            ws.write(csvLine + '\n');
+            const csvLine = `${detail.block},${detail.extrinsicIndex},${detail.signer},${detail.derivativeIndex},${detail.derivedAccount}\n`;
+            fs.appendFileSync(detailsPath, csvLine);
           };
 
           // Check ALL extrinsics, not just utility ones
@@ -515,10 +517,34 @@ async function main() {
         });
       }
 
+      // Update summary after each batch
+      const currentEndBlock = batch[batch.length - 1];
+      const elapsed = (Date.now() - startTime) / 1000;
+      
+      const intermediateSummary = {
+        chain: chain.toString(),
+        scannedBlocks: currentEndBlock - startBlock + 1,
+        startBlock,
+        endBlock: currentEndBlock,
+        totalDerivatives: counters.total,
+        uniqueAccounts: counters.unique.size,
+        totalExtrinsics: debugCounters.totalExtrinsics,
+        utilityExtrinsics: debugCounters.utilityExtrinsics,
+        utilityMethodsFound: debugCounters.utilityMethods,
+        sectionCounts: debugCounters.sectionCounts || {},
+        sectionMethodsFound: debugCounters.sectionMethods || {},
+        processingTime: `${elapsed.toFixed(2)}s`,
+        blocksPerSecond: ((currentEndBlock - startBlock + 1) / elapsed).toFixed(2),
+        timestamp: new Date().toISOString(),
+        status: batchIdx + 1 === batches.length ? 'completed' : 'in_progress',
+        progress: `${batchIdx + 1}/${batches.length} batches (${((batchIdx + 1) / batches.length * 100).toFixed(1)}%)`
+      };
+      
+      fs.writeFileSync(summaryPath, JSON.stringify(intermediateSummary, null, 2));
+
       // Progress
       const progress = ((batchIdx + 1) / batches.length * 100).toFixed(1);
-      const elapsed = (Date.now() - startTime) / 1000;
-      const rate = (batch[batch.length - 1] - startBlock + 1) / elapsed;
+      const rate = (currentEndBlock - startBlock + 1) / elapsed;
       
       console.log(`✅ Batch ${batchIdx + 1}/${batches.length} (${progress}%) - ${rate.toFixed(1)} blocks/s`);
       
@@ -527,49 +553,32 @@ async function main() {
     }
   }
 
-  ws.end();
 
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
 
-  const summary = {
-    chain: chain.toString(),
-    scannedBlocks: endBlock - startBlock + 1,
-    startBlock,
-    endBlock,
-    totalDerivatives: counters.total,
-    uniqueAccounts: counters.unique.size,
-    totalExtrinsics: debugCounters.totalExtrinsics,
-    utilityExtrinsics: debugCounters.utilityExtrinsics,
-    utilityMethodsFound: debugCounters.utilityMethods,
-    sectionCounts: debugCounters.sectionCounts || {},
-    sectionMethodsFound: debugCounters.sectionMethods || {},
-    processingTime: `${elapsed}s`,
-    blocksPerSecond: ((endBlock - startBlock + 1) / elapsed).toFixed(2),
-    timestamp: new Date().toISOString()
-  };
+  // Read the final summary for reporting
+  const finalSummary = JSON.parse(fs.readFileSync(summaryPath, 'utf8'));
   
-  fs.writeFileSync(summaryPath, JSON.stringify(summary, null, 2));
-
   console.log('\n' + '='.repeat(60));
   console.log('📊 SCAN COMPLETED');
   console.log('='.repeat(60));
-  console.log(`⏱️  Time: ${elapsed}s (${summary.blocksPerSecond} blocks/s)`);
-  console.log(`📦 Total extrinsics: ${debugCounters.totalExtrinsics}`);
-  console.log(`🔧 Utility extrinsics: ${debugCounters.utilityExtrinsics}`);
-  console.log(`🎯 asDerivative found: ${counters.total}`);
-  console.log(`🔑 Unique derived accounts: ${counters.unique.size}`);
+  console.log(`⏱️  Time: ${elapsed}s (${finalSummary.blocksPerSecond} blocks/s)`);
+  console.log(`📦 Total extrinsics: ${finalSummary.totalExtrinsics}`);
+  console.log(`🔧 Utility extrinsics: ${finalSummary.utilityExtrinsics}`);
+  console.log(`🎯 asDerivative found: ${finalSummary.totalDerivatives}`);
+  console.log(`🔑 Unique derived accounts: ${finalSummary.uniqueAccounts}`);
   
-  if (Object.keys(debugCounters.utilityMethods).length > 0) {
+  if (Object.keys(finalSummary.utilityMethodsFound).length > 0) {
     console.log(`\n📊 Utility methods found:`);
-    Object.entries(debugCounters.utilityMethods).forEach(([method, count]) => {
+    Object.entries(finalSummary.utilityMethodsFound).forEach(([method, count]) => {
       console.log(`   - ${method}: ${count}`);
     });
   }
 
   // Show all sections analyzed
-  if (debugCounters.sectionCounts && Object.keys(debugCounters.sectionCounts).length > 0) {
+  if (finalSummary.sectionCounts && Object.keys(finalSummary.sectionCounts).length > 0) {
     console.log(`\n📋 Extrinsics by section:`);
-    Object.entries(debugCounters.sectionCounts)
+    Object.entries(finalSummary.sectionCounts)
       .sort(([,a], [,b]) => b - a) // Sort by count descending
       .forEach(([section, count]) => {
         console.log(`   - ${section}: ${count}`);
@@ -577,17 +586,17 @@ async function main() {
   }
 
   // Show methods that could potentially contain asDerivative
-  if (debugCounters.sectionMethods) {
+  if (finalSummary.sectionMethodsFound) {
     const relevantSections = ['proxy', 'multisig', 'sudo', 'scheduler', 'utility'];
     const foundRelevant = relevantSections.filter(section =>
-      debugCounters.sectionMethods[section] && Object.keys(debugCounters.sectionMethods[section]).length > 0
+      finalSummary.sectionMethodsFound[section] && Object.keys(finalSummary.sectionMethodsFound[section]).length > 0
     );
     
     if (foundRelevant.length > 0) {
       console.log(`\n🔍 Methods in relevant sections:`);
       foundRelevant.forEach(section => {
         console.log(`   ${section}:`);
-        Object.entries(debugCounters.sectionMethods[section]).forEach(([method, count]) => {
+        Object.entries(finalSummary.sectionMethodsFound[section]).forEach(([method, count]) => {
           console.log(`     - ${method}: ${count}`);
         });
       });
@@ -597,8 +606,10 @@ async function main() {
   console.log(`\n💾 Saved files:`);
   console.log(`   - Details: ${detailsPath}`);
   console.log(`   - Summary: ${summaryPath}`);
+  console.log(`\n📊 Status: ${finalSummary.status}`);
+  console.log(`📈 Progress: ${finalSummary.progress}`);
 
-  if (counters.total === 0) {
+  if (finalSummary.totalDerivatives === 0) {
     console.log('\n⚠️  WARNING: No asDerivative found!');
     console.log('\n💡 The enhanced scanner now checks:');
     console.log('   ✅ Direct utility.asDerivative calls');
@@ -609,6 +620,11 @@ async function main() {
     console.log('   ✅ Calls wrapped in scheduler.schedule*/scheduleNamed*');
     console.log('   ✅ Recursive analysis of nested calls');
   }
+
+  console.log('\n💡 Incremental saving enabled:');
+  console.log('   ✅ CSV data appended in real-time');
+  console.log('   ✅ Summary updated after each batch');
+  console.log('   ✅ Safe to interrupt and resume');
 
   await api.disconnect();
   console.log('\n✅ Disconnected.');
