@@ -611,20 +611,7 @@ async function main() {
 
   if (finalSummary.totalDerivatives === 0) {
     console.log('\n⚠️  WARNING: No asDerivative found!');
-    console.log('\n💡 The enhanced scanner now checks:');
-    console.log('   ✅ Direct utility.asDerivative calls');
-    console.log('   ✅ Nested calls in utility.batch/batchAll/forceBatch');
-    console.log('   ✅ Calls wrapped in proxy.proxy/proxyAnnounced');
-    console.log('   ✅ Calls wrapped in multisig.asMulti/asMultiThreshold1');
-    console.log('   ✅ Calls wrapped in sudo.sudo/sudoAs/sudoUncheckedWeight');
-    console.log('   ✅ Calls wrapped in scheduler.schedule*/scheduleNamed*');
-    console.log('   ✅ Recursive analysis of nested calls');
   }
-
-  console.log('\n💡 Incremental saving enabled:');
-  console.log('   ✅ CSV data appended in real-time');
-  console.log('   ✅ Summary updated after each batch');
-  console.log('   ✅ Safe to interrupt and resume');
 
   await api.disconnect();
   console.log('\n✅ Disconnected.');
