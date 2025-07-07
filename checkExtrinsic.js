@@ -87,11 +87,7 @@ function checkAsDerivative(callMethod, callArgs, api, blockNumber, extrinsicInde
       extrinsicIndex,
       signer,
       derivativeIndex,
-      derivedAccount,
-      innerCall: `${innerCall.method.section}.${innerCall.method.method}`,
-      innerCallArgs: innerCall.args.map(a => a.toHuman()),
-      depth,
-      context: depth === 0 ? 'Direct' : 'Nested'
+      derivedAccount
     });
     
     // Continue checking the inner call for nested asDerivative
@@ -452,10 +448,11 @@ async function main() {
   }
 
   const outDir = process.env.OUT_DIR || '.';
-  const detailsPath = path.join(outDir, 'derived_details-ah-test-200000.json');
-  const summaryPath = path.join(outDir, 'derived_summary.json');
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').split('.')[0];
+  const detailsPath = path.join(outDir, `derived_details_${timestamp}.csv`);
+  const summaryPath = path.join(outDir, `derived_summary_${timestamp}.json`);
   const ws = fs.createWriteStream(detailsPath);
-  ws.write('[');
+  ws.write('block,extrinsicIndex,signer,derivativeIndex,derivedAccount\n');
   let firstDetail = true;
 
   const counters = { total: 0, unique: new Set() };
@@ -500,9 +497,8 @@ async function main() {
           }
 
           const writeDetail = detail => {
-            const json = JSON.stringify(detail);
-            ws.write((firstDetail ? '' : ',') + '\n' + json);
-            firstDetail = false;
+            const csvLine = `${detail.block},${detail.extrinsicIndex},${detail.signer},${detail.derivativeIndex},${detail.derivedAccount}`;
+            ws.write(csvLine + '\n');
           };
 
           // Check ALL extrinsics, not just utility ones
@@ -531,7 +527,6 @@ async function main() {
     }
   }
 
-  ws.write('\n]');
   ws.end();
 
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
